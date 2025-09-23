@@ -15,7 +15,6 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
-
 from streamlit_cookies_manager import EncryptedCookieManager
 
 # --- DB connection ---
@@ -31,9 +30,23 @@ c.execute("""CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL DEFAULT 'Admin'
 )""")
 
+c.execute("""CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    description TEXT
+)""")
+
+c.execute("""CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    task_number TEXT NOT NULL,
+    task_desc TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
+)""")
+
 c.execute("""CREATE TABLE IF NOT EXISTS pr_tracking (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pr_number TEXT NOT NULL,   -- ✅ not unique anymore
+    pr_number TEXT UNIQUE NOT NULL,
     date_request TEXT,
     staff_name TEXT,
     programme_unit TEXT,
@@ -58,25 +71,22 @@ c.execute("""CREATE TABLE IF NOT EXISTS pr_tracking (
     assigned_to TEXT
 )""")
 
-# --- WBL allocations now store free-text project/task names ---
 c.execute("""CREATE TABLE IF NOT EXISTS pr_wbls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pr_id INTEGER NOT NULL,             -- ✅ foreign key to PR ID
-    project_name TEXT NOT NULL,
-    task_name TEXT NOT NULL,
+    pr_number TEXT NOT NULL,
+    task_id INTEGER NOT NULL,
     percentage INTEGER NOT NULL,
-    FOREIGN KEY (pr_id) REFERENCES pr_tracking (id) ON DELETE CASCADE
+    FOREIGN KEY (pr_number) REFERENCES pr_tracking (pr_number) ON DELETE CASCADE,
+    FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE
 )""")
 
 c.execute("""CREATE TABLE IF NOT EXISTS payment_tracking (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pr_id INTEGER,                      -- ✅ link to PR by ID
-    pr_number TEXT,                     -- keep original PR number for reference
+    pr_number TEXT,
     category TEXT,
     po_number TEXT,
     invoice_number TEXT,
     wave_receipt TEXT,
-    work_confirmation TEXT,             -- ✅ NEW field (Yes/No)
     work_order_yesno TEXT,
     work_order_number TEXT,
     actual_usd REAL,
@@ -85,9 +95,8 @@ c.execute("""CREATE TABLE IF NOT EXISTS payment_tracking (
     remarks TEXT,
     status TEXT DEFAULT 'Pending',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (pr_id) REFERENCES pr_tracking (id) ON DELETE CASCADE
+    FOREIGN KEY (pr_number) REFERENCES pr_tracking (pr_number) ON DELETE CASCADE
 )""")
-
 
 c.execute("""CREATE TABLE IF NOT EXISTS dsa_payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -224,9 +233,9 @@ page = st.sidebar.radio("📂 Navigation", [
     "PR Tracking",
     "Payment Tracking",
     "User Management",
+    "Project & Task Management",
     "Reports"
 ])
-
 # ==============================
 # Part 2: Dashboard
 # ==============================
@@ -239,21 +248,21 @@ if page == "Dashboard":
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        all_prs = pd.read_sql("SELECT DISTINCT pr_number FROM pr_tracking", conn)
+        all_prs = pd.read_sql("SELECT pr_number FROM pr_tracking", conn)
         pr_filter = st.selectbox(
-            "Filter by PR Number",
-            ["All"] + all_prs["pr_number"].dropna().tolist() if not all_prs.empty else ["All"]
+            "Filter by PR Number", 
+            ["All"] + all_prs["pr_number"].tolist() if not all_prs.empty else ["All"]
         )
     with col2:
         all_categories = pd.read_sql("SELECT DISTINCT category FROM pr_tracking", conn)
         cat_filter = st.selectbox(
-            "Filter by Category",
+            "Filter by Category", 
             ["All"] + all_categories["category"].dropna().tolist() if not all_categories.empty else ["All"]
         )
     with col3:
         all_staff = pd.read_sql("SELECT DISTINCT staff_name FROM pr_tracking", conn)
         staff_filter = st.selectbox(
-            "Filter by Staff/User",
+            "Filter by Staff/User", 
             ["All"] + all_staff["staff_name"].dropna().tolist() if not all_staff.empty else ["All"]
         )
 
@@ -294,25 +303,25 @@ if page == "Dashboard":
 
         col1, col2 = st.columns(2)
         with col1:
-            update_pr = st.selectbox("Select PR (by ID) to update status", prs["id"])
-            new_status = st.selectbox("New Status", ["Submitted", "In Process", "Completed"])
+            update_pr = st.selectbox("Select PR to update status", prs["pr_number"])
+            new_status = st.selectbox("New Status", ["Submitted","In Process","Completed"])
             if st.button("🔄 Update PR Status"):
-                old_status = c.execute("SELECT status FROM pr_tracking WHERE id=?", (update_pr,)).fetchone()[0]
-                c.execute("UPDATE pr_tracking SET status=? WHERE id=?", (new_status, update_pr))
+                old_status = c.execute("SELECT status FROM pr_tracking WHERE pr_number=?", (update_pr,)).fetchone()[0]
+                c.execute("UPDATE pr_tracking SET status=? WHERE pr_number=?", (new_status, update_pr))
                 c.execute("""INSERT INTO status_history 
                              (record_type, record_id, old_status, new_status, changed_by) 
                              VALUES (?,?,?,?,?)""",
-                          ("PR", str(update_pr), old_status, new_status, st.session_state["user"]))
+                          ("PR", update_pr, old_status, new_status, st.session_state["user"]))
                 conn.commit()
-                st.success(f"PR ID {update_pr} updated to {new_status}")
+                st.success(f"PR {update_pr} updated to {new_status}")
                 st.rerun()
 
         with col2:
-            delete_pr = st.selectbox("Select PR (by ID) to delete", prs["id"])
+            delete_pr = st.selectbox("Select PR to delete", prs["pr_number"])
             if st.button("🗑️ Delete PR"):
-                c.execute("DELETE FROM pr_tracking WHERE id=?", (delete_pr,))
+                c.execute("DELETE FROM pr_tracking WHERE pr_number=?", (delete_pr,))
                 conn.commit()
-                st.success(f"PR ID {delete_pr} deleted")
+                st.success(f"PR {delete_pr} deleted")
                 st.rerun()
 
     # --- Payment Records ---
@@ -326,7 +335,7 @@ if page == "Dashboard":
         col1, col2 = st.columns(2)
         with col1:
             update_pay = st.selectbox("Select Payment ID to update status", payments["id"])
-            new_status = st.selectbox("New Status (Payment)", ["Pending", "In Process", "Completed"])
+            new_status = st.selectbox("New Status (Payment)", ["Pending","In Process","Completed"])
             if st.button("🔄 Update Payment Status"):
                 old_status = c.execute("SELECT status FROM payment_tracking WHERE id=?", (update_pay,)).fetchone()[0]
                 c.execute("UPDATE payment_tracking SET status=? WHERE id=?", (new_status, update_pay))
@@ -338,16 +347,16 @@ if page == "Dashboard":
 
                 # --- Cascade update: if payment completed, mark PR completed too
                 if new_status == "Completed":
-                    pr_id = c.execute("SELECT pr_id FROM payment_tracking WHERE id=?", (update_pay,)).fetchone()[0]
-                    if pr_id:
-                        old_pr_status = c.execute("SELECT status FROM pr_tracking WHERE id=?", (pr_id,)).fetchone()[0]
-                        c.execute("UPDATE pr_tracking SET status='Completed' WHERE id=?", (pr_id,))
+                    pr_num = c.execute("SELECT pr_number FROM payment_tracking WHERE id=?", (update_pay,)).fetchone()[0]
+                    if pr_num:
+                        old_pr_status = c.execute("SELECT status FROM pr_tracking WHERE pr_number=?", (pr_num,)).fetchone()[0]
+                        c.execute("UPDATE pr_tracking SET status='Completed' WHERE pr_number=?", (pr_num,))
                         c.execute("""INSERT INTO status_history 
                                      (record_type, record_id, old_status, new_status, changed_by) 
                                      VALUES (?,?,?,?,?)""",
-                                  ("PR", str(pr_id), old_pr_status, "Completed", st.session_state["user"]))
+                                  ("PR", pr_num, old_pr_status, "Completed", st.session_state["user"]))
                         conn.commit()
-                        st.info(f"Linked PR ID {pr_id} also marked Completed ✅")
+                        st.info(f"Linked PR {pr_num} also marked Completed ✅")
 
                 st.success(f"Payment {update_pay} updated to {new_status}")
                 st.rerun()
@@ -371,7 +380,7 @@ if page == "Dashboard":
         col1, col2 = st.columns(2)
         with col1:
             update_dsa = st.selectbox("Select DSA ID to update status", dsas["id"])
-            new_status = st.selectbox("New Status (DSA)", ["Pending", "In Process", "Completed", "Paid"])
+            new_status = st.selectbox("New Status (DSA)", ["Pending","In Process","Completed","Paid"])
             if st.button("🔄 Update DSA Status"):
                 old_status = c.execute("SELECT status FROM dsa_payments WHERE id=?", (update_dsa,)).fetchone()[0]
                 c.execute("UPDATE dsa_payments SET status=? WHERE id=?", (new_status, update_dsa))
@@ -402,7 +411,7 @@ if page == "Dashboard":
         col1, col2 = st.columns(2)
         with col1:
             update_oa = st.selectbox("Select OA ID to update status", oas["id"])
-            new_status = st.selectbox("New Status (OA)", ["Pending", "In Process", "Completed", "Paid"])
+            new_status = st.selectbox("New Status (OA)", ["Pending","In Process","Completed","Paid"])
             if st.button("🔄 Update OA Status"):
                 old_status = c.execute("SELECT status FROM operational_advances WHERE id=?", (update_oa,)).fetchone()[0]
                 c.execute("UPDATE operational_advances SET status=? WHERE id=?", (new_status, update_oa))
@@ -423,49 +432,20 @@ if page == "Dashboard":
                 st.rerun()
 
     # --- Reminders ---
-
     st.subheader("⏰ PR Reminders")
     reminders = pd.read_sql("""
-        SELECT id, pr_number, staff_name, category, from_date, reminder_days
+        SELECT pr_number, staff_name, category, to_date, reminder_days
         FROM pr_tracking
         WHERE reminder_expiry='Yes'
     """, conn)
-
     if reminders.empty:
         st.success("✅ No reminders due.")
     else:
-        reminders["from_date"] = pd.to_datetime(reminders["from_date"], errors="coerce")
-        reminders["reminder_days"] = pd.to_numeric(reminders["reminder_days"], errors="coerce")
-
-        reminders["Reminder Date"] = reminders.apply(
-            lambda r: (r["from_date"] - pd.to_timedelta(int(r["reminder_days"]), unit="D")).date()
-            if pd.notnull(r["from_date"]) and pd.notnull(r["reminder_days"]) else pd.NaT,
-            axis=1
-        )
-
         today = datetime.today().date()
-        def status_label(d):
-            if pd.isna(d):
-                return "—"
-            if d < today:
-                return "⏰ Overdue"
-            if d == today:
-                return "⚠️ Due Today"
-            return "📌 Upcoming"
-
-        reminders["Status"] = reminders["Reminder Date"].apply(status_label)
-
-        view_cols = ["id","pr_number","staff_name","category","from_date","reminder_days","Reminder Date","Status"]
-        st.dataframe(reminders[view_cols].rename(columns={
-            "id": "PR ID",
-            "pr_number": "PR Number",
-            "staff_name": "Staff",
-            "category": "Category",
-            "from_date": "From Date",
-            "reminder_days": "Days Before"
-        }), use_container_width=True, height=300)
-
-
+        reminders["Reminder Date"] = pd.to_datetime(reminders["to_date"]) - pd.to_timedelta(reminders["reminder_days"], unit="D")
+        reminders["Reminder Date"] = reminders["Reminder Date"].dt.date
+        reminders["Status"] = reminders["Reminder Date"].apply(lambda d: "⚠️ DUE" if d <= today else "📌 Upcoming")
+        st.dataframe(reminders, use_container_width=True, height=300)
 # ==============================
 # Part 3: PR Tracking
 # ==============================
@@ -478,7 +458,7 @@ elif page == "PR Tracking":
 
     col1, col2 = st.columns(2)
     with col1:
-        pr_number = st.text_input("PR Number")
+        pr_number = st.text_input("PR Number (unique)")
         date_request = st.date_input("Date of Request")
         staff_name = st.text_input("Created By", value=st.session_state["user"])
         programme_unit = st.selectbox(
@@ -501,7 +481,7 @@ elif page == "PR Tracking":
         )
 
     # --- Rental Vehicle Fields ---
-    type_vehicle = traveller_name = traveller_phone = None
+    type_vehicle = traveller_name = traveller_phone = reminder_expiry = reminder_days = None
     if category == "Rental Vehicle":
         st.markdown("### 🚗 Rental Vehicle Details")
         col1, col2 = st.columns(2)
@@ -513,6 +493,9 @@ elif page == "PR Tracking":
             traveller_name = st.text_input("Traveller Name")
         with col2:
             traveller_phone = st.text_input("Traveller Phone #")
+            reminder_expiry = st.radio("Reminder about expiry?", ["Yes","No"])
+            if reminder_expiry == "Yes":
+                reminder_days = st.number_input("Reminder days before", min_value=1)
 
     # --- Dates & Duration ---
     st.markdown("### 📅 Travel/Request Duration")
@@ -536,46 +519,61 @@ elif page == "PR Tracking":
         est_usd = st.number_input("Estimated Cost (USD)", min_value=0.0)
         comments = st.text_area("Comments")
 
-    # --- Reminder (for all PRs) ---
-    st.markdown("### ⏰ Reminder")
-    reminder_expiry = st.radio("Set reminder before start date (From)?", ["Yes", "No"])
-    reminder_days = None
-    if reminder_expiry == "Yes":
-        reminder_days = st.number_input(
-            "Remind me this many days before From date",
-            min_value=1
-        )
-
-    # --- WBL Selection (Manual Text Entry) ---
+    # --- WBL Selection ---
     st.markdown("### 📂 WBL Allocation")
-    wbl_selections = []
-    num_wbls = st.number_input("Number of allocations", min_value=1, max_value=5, value=1)
+    projects_df = pd.read_sql("SELECT * FROM projects", conn)
 
-    for i in range(num_wbls):
-        st.markdown(f"**WBL #{i+1}**")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            proj_name = st.text_input(f"Project Name (WBL {i+1})", key=f"proj_{i}")
-        with col2:
-            task_name = st.text_input(f"Task Name (WBL {i+1})", key=f"task_{i}")
-        with col3:
-            perc = st.number_input(
-                f"Percentage (WBL {i+1})", 
-                min_value=0, max_value=100, 
-                value=100 if i==0 else 0, key=f"perc_{i}"
+    wbl_selections = []
+    if projects_df.empty:
+        st.warning("⚠️ Add projects and tasks in Project & Task Management first.")
+    else:
+        num_wbls = st.number_input("Number of allocations", min_value=1, max_value=5, value=1)
+        for i in range(num_wbls):
+            st.markdown(f"**WBL #{i+1}**")
+
+            proj_choice = st.selectbox(
+                f"Select Project for WBL {i+1}", 
+                projects_df["code"], 
+                key=f"proj_{i}"
             )
-        if proj_name.strip() and task_name.strip():
-            wbl_selections.append((proj_name.strip(), task_name.strip(), perc))
+
+            proj_row = c.execute("SELECT id FROM projects WHERE code=?", (proj_choice.strip(),)).fetchone()
+            proj_id = proj_row[0] if proj_row else None
+
+            if not proj_id:
+                st.error("⚠️ Project not found in DB.")
+                continue
+
+            proj_tasks = pd.read_sql("SELECT * FROM tasks WHERE project_id=?", conn, params=[proj_id])
+            if proj_tasks.empty:
+                st.warning("⚠️ This project has no tasks.")
+            else:
+                task_choice = st.selectbox(
+                    f"Select Task for WBL {i+1}", 
+                    proj_tasks["task_number"], 
+                    key=f"task_{i}"
+                )
+
+                task_row = c.execute("SELECT id FROM tasks WHERE task_number=? AND project_id=?", 
+                                    (task_choice.strip(), proj_id)).fetchone()
+                task_id = task_row[0] if task_row else None
+
+                perc = st.number_input(
+                    f"Percentage for WBL {i+1}", 
+                    min_value=0, max_value=100, 
+                    value=100 if i==0 else 0, key=f"perc_{i}"
+                )
+
+                wbl_selections.append((task_id, perc))
 
     # --- Submit PR ---
     if st.button("✅ Submit PR"):
         if not pr_number.strip():
             st.error("⚠️ PR number is required.")
-        elif sum([p for _, _, p in wbl_selections if p]) != 100:
+        elif sum([p for _, p in wbl_selections if p]) != 100:
             st.error("⚠️ WBL percentages must add up to 100!")
         else:
             try:
-                # Insert PR
                 c.execute("""INSERT INTO pr_tracking (
                     pr_number, date_request, staff_name, programme_unit, type_services, category,
                     description, type_vehicle, traveller_name, traveller_phone,
@@ -590,21 +588,19 @@ elif page == "PR Tracking":
                     est_pkr, est_usd, reminder_expiry, reminder_days,
                     comments, "Submitted", datetime.now(), assigned_to
                 ))
-                pr_id = c.lastrowid  # ✅ capture inserted PR ID
 
-                # Insert WBLs
-                for proj_name, task_name, perc in wbl_selections:
-                    c.execute("INSERT INTO pr_wbls (pr_id, project_name, task_name, percentage) VALUES (?,?,?,?)",
-                              (pr_id, proj_name, task_name, perc))
+                for task_id, perc in wbl_selections:
+                    if task_id:
+                        c.execute("INSERT INTO pr_wbls (pr_number, task_id, percentage) VALUES (?,?,?)",
+                                (pr_number, task_id, perc))
 
-                # Log creation
                 c.execute("""INSERT INTO status_history 
                              (record_type, record_id, old_status, new_status, changed_by) 
                              VALUES (?,?,?,?,?)""",
-                          ("PR", pr_id, None, "Submitted", st.session_state["user"]))
+                        ("PR", pr_number, None, "Submitted", st.session_state["user"]))
 
                 conn.commit()
-                st.success(f"✅ PR {pr_number} (ID {pr_id}) submitted successfully!")
+                st.success(f"✅ PR {pr_number} submitted successfully!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
@@ -623,24 +619,26 @@ elif page == "PR Tracking":
         st.dataframe(prs, use_container_width=True, height=400)
 
         st.markdown("### 📂 WBL Preview")
-        selected_pr = st.selectbox("Select a PR to view WBLs", prs["id"])
+        selected_pr = st.selectbox("Select a PR to view WBLs", prs["pr_number"])
         wbls = pd.read_sql("""
-            SELECT project_name, task_name, percentage
-            FROM pr_wbls
-            WHERE pr_id=?
+            SELECT pw.percentage, p.code AS project_code, t.task_number, t.task_desc
+            FROM pr_wbls pw
+            LEFT JOIN tasks t ON pw.task_id = t.id
+            LEFT JOIN projects p ON t.project_id = p.id
+            WHERE pw.pr_number=?
         """, conn, params=[selected_pr])
         if wbls.empty:
             st.info("No WBLs found for this PR.")
         else:
             st.dataframe(
                 wbls.rename(columns={
-                    "project_name": "Project",
-                    "task_name": "Task",
-                    "percentage": "Percentage"
+                    "percentage": "Percentage",
+                    "project_code": "Project Code",
+                    "task_number": "Task Number",
+                    "task_desc": "Task Description"
                 }),
                 use_container_width=True, height=300
             )
-
 # ==============================
 # Part 4: Payment Tracking
 # ==============================
@@ -663,29 +661,13 @@ elif page == "Payment Tracking":
         if prs.empty:
             st.warning("⚠️ No PRs available for this category.")
         else:
-            pr_number_choice = st.selectbox("Select PR Number", prs["pr_number"].unique().tolist())
-            pr_subset = prs[prs["pr_number"] == pr_number_choice]
-
-            # Build descriptive labels for each PR line
-            pr_options = {
-                row["id"]: f"ID {row['id']} | {row['pr_number']} | {row['description']} | {row['staff_name']}"
-                for _, row in pr_subset.iterrows()
-            }
-
-            pr_id_choice = st.selectbox(
-                "Select PR Line",
-                options=list(pr_options.keys()),
-                format_func=lambda x: pr_options[x]
-            )
-
-            pr_data = pr_subset[pr_subset["id"] == pr_id_choice].iloc[0]
+            pr_choice = st.selectbox("Select PR Number", prs["pr_number"])
+            pr_data = prs[prs["pr_number"] == pr_choice].iloc[0]
 
             # --- PR Details (pretty card style) ---
             st.markdown("### 📝 Purchase Request Details")
             st.markdown(f"""
             <div style="background:#f9f9f9; padding:10px; border-radius:8px;">
-                <b>PR Number:</b> {pr_data['pr_number']}<br>
-                <b>ID:</b> {pr_data['id']}<br>
                 <b>Date of Request:</b> {pr_data['date_request']}<br>
                 <b>Created By:</b> {pr_data['staff_name']}<br>
                 <b>Programme Unit:</b> {pr_data['programme_unit']}<br>
@@ -704,7 +686,6 @@ elif page == "Payment Tracking":
             po_number = st.text_input("PO Number")
             invoice_number = st.text_input("Invoice Number")
             wave_receipt = st.text_input("Wave Receipt Number")
-            work_confirmation = st.selectbox("Work Confirmation", ["No", "Yes"])
 
             work_order_yesno, work_order_number = None, None
             if category_choice != "Rental Vehicle":
@@ -723,58 +704,37 @@ elif page == "Payment Tracking":
             status = st.selectbox("Payment Status", ["Pending","In Process","Completed"])
 
             if st.button("💾 Save Payment"):
-                # Check if a payment already exists for this PR line
-                existing_payment = c.execute(
-                    "SELECT id FROM payment_tracking WHERE pr_id=?", (pr_id_choice,)
-                ).fetchone()
-
-                if existing_payment:
-                    # ✅ Update existing record
-                    c.execute("""UPDATE payment_tracking
-                                SET pr_number=?, category=?, po_number=?, invoice_number=?, wave_receipt=?, 
-                                    work_confirmation=?, work_order_yesno=?, work_order_number=?, actual_usd=?, actual_pkr=?,
-                                    payment_date=?, remarks=?, status=?
-                                WHERE pr_id=?""",
-                            (pr_number_choice, category_choice, po_number, invoice_number, wave_receipt,
-                            work_confirmation, work_order_yesno, work_order_number, actual_usd, actual_pkr,
-                            str(payment_date), remarks, status, pr_id_choice))
-                    st.success(f"✅ Updated payment for PR {pr_number_choice} (ID {pr_id_choice}). Status: {status}")
-
+                if not pr_choice:
+                    st.error("⚠️ Please select a PR.")
                 else:
-                    # ✅ Insert new record
                     c.execute("""INSERT INTO payment_tracking (
-                        pr_id, pr_number, category, po_number, invoice_number, wave_receipt,
-                        work_confirmation, work_order_yesno, work_order_number, actual_usd, actual_pkr,
+                        pr_number, category, po_number, invoice_number, wave_receipt,
+                        work_order_yesno, work_order_number, actual_usd, actual_pkr,
                         payment_date, remarks, status
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                        pr_id_choice, pr_number_choice, category_choice, po_number, invoice_number, wave_receipt,
-                        work_confirmation, work_order_yesno, work_order_number, actual_usd, actual_pkr,
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                        pr_choice, category_choice, po_number, invoice_number, wave_receipt,
+                        work_order_yesno, work_order_number, actual_usd, actual_pkr,
                         str(payment_date), remarks, status
                     ))
-                    st.success(f"✅ New payment saved for PR {pr_number_choice} (ID {pr_id_choice}). Status: {status}")
 
-                # log status history
-                c.execute("""INSERT INTO status_history 
-                            (record_type, record_id, old_status, new_status, changed_by) 
-                            VALUES (?,?,?,?,?)""",
-                        ("Payment", str(pr_id_choice), None, status, st.session_state["user"]))
-
-                # sync PR status if payment is completed
-                if status == "Completed":
-                    old_pr_status = pr_data["status"]
-                    c.execute("UPDATE pr_tracking SET status='Completed' WHERE id=?", (pr_id_choice,))
+                    # log payment status
                     c.execute("""INSERT INTO status_history 
-                                (record_type, record_id, old_status, new_status, changed_by) 
-                                VALUES (?,?,?,?,?)""",
-                            ("PR", str(pr_id_choice), old_pr_status, "Completed", st.session_state["user"]))
+                                 (record_type, record_id, old_status, new_status, changed_by) 
+                                 VALUES (?,?,?,?,?)""",
+                              ("Payment", pr_choice, None, status, st.session_state["user"]))
 
-                conn.commit()
+                    # workflow sync: mark PR as completed if payment completed
+                    if status == "Completed":
+                        old_pr_status = c.execute("SELECT status FROM pr_tracking WHERE pr_number=?", (pr_choice,)).fetchone()[0]
+                        c.execute("UPDATE pr_tracking SET status='Completed' WHERE pr_number=?", (pr_choice,))
+                        c.execute("""INSERT INTO status_history 
+                                     (record_type, record_id, old_status, new_status, changed_by) 
+                                     VALUES (?,?,?,?,?)""",
+                                  ("PR", pr_choice, old_pr_status, "Completed", st.session_state["user"]))
 
-                # ⏳ Pause to show success message for 2 seconds
-                time.sleep(2)
-
-                st.rerun()
-
+                    conn.commit()
+                    st.success(f"✅ Payment saved for PR {pr_choice}. Status: {status}")
+                    st.rerun()
 
     # --- Case 2: DSA Payment ---
     elif category_choice == "DSA Payment":
@@ -812,22 +772,25 @@ elif page == "Payment Tracking":
             status = st.selectbox("Status", ["Pending","In Process","Completed","Paid"])
 
         if st.button("💾 Save DSA Payment"):
-            c.execute("""INSERT INTO dsa_payments (
-                date_request, staff_name, programme_unit, type_services, dsa_type,
-                vendor_name, description, location, start_date, end_date,
-                days, amount_pkr, ist_number, comments, status
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                str(date_request), staff_name, programme_unit, type_services, dsa_type,
-                vendor_name, description, location, str(start_date), str(end_date),
-                days, amount_pkr, ist_number, comments, status
-            ))
-            c.execute("""INSERT INTO status_history 
-                         (record_type, record_id, old_status, new_status, changed_by) 
-                         VALUES (?,?,?,?,?)""",
-                      ("DSA", vendor_name, None, status, st.session_state["user"]))
-            conn.commit()
-            st.success("✅ DSA Payment saved.")
-            st.rerun()
+            if not vendor_name.strip():
+                st.error("⚠️ Vendor name is required.")
+            else:
+                c.execute("""INSERT INTO dsa_payments (
+                    date_request, staff_name, programme_unit, type_services, dsa_type,
+                    vendor_name, description, location, start_date, end_date,
+                    days, amount_pkr, ist_number, comments, status
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    str(date_request), staff_name, programme_unit, type_services, dsa_type,
+                    vendor_name, description, location, str(start_date), str(end_date),
+                    days, amount_pkr, ist_number, comments, status
+                ))
+                c.execute("""INSERT INTO status_history 
+                             (record_type, record_id, old_status, new_status, changed_by) 
+                             VALUES (?,?,?,?,?)""",
+                          ("DSA", vendor_name, None, status, st.session_state["user"]))
+                conn.commit()
+                st.success("✅ DSA Payment saved.")
+                st.rerun()
 
     # --- Case 3: Operational Advance ---
     elif category_choice == "Operational Advance":
@@ -855,25 +818,27 @@ elif page == "Payment Tracking":
             status = st.selectbox("Status", ["Pending","In Process","Completed","Paid"])
 
         if st.button("💾 Save Operational Advance"):
-            c.execute("""INSERT INTO operational_advances (
-                date_request, staff_name, programme_unit, supplier_name, description,
-                invoice_type, invoice_no, total_amount, invoice_currency, payment_currency,
-                location, comments, status
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                str(date_request), staff_name, programme_unit, supplier_name, description,
-                invoice_type, invoice_no, total_amount, invoice_currency, payment_currency,
-                location, comments, status
-            ))
-            c.execute("""INSERT INTO status_history 
-                         (record_type, record_id, old_status, new_status, changed_by) 
-                         VALUES (?,?,?,?,?)""",
-                      ("OA", supplier_name, None, status, st.session_state["user"]))
-            conn.commit()
-            st.success("✅ Operational Advance saved.")
-            st.rerun()
-
+            if not supplier_name.strip():
+                st.error("⚠️ Supplier name is required.")
+            else:
+                c.execute("""INSERT INTO operational_advances (
+                    date_request, staff_name, programme_unit, supplier_name, description,
+                    invoice_type, invoice_no, total_amount, invoice_currency, payment_currency,
+                    location, comments, status
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    str(date_request), staff_name, programme_unit, supplier_name, description,
+                    invoice_type, invoice_no, total_amount, invoice_currency, payment_currency,
+                    location, comments, status
+                ))
+                c.execute("""INSERT INTO status_history 
+                             (record_type, record_id, old_status, new_status, changed_by) 
+                             VALUES (?,?,?,?,?)""",
+                          ("OA", supplier_name, None, status, st.session_state["user"]))
+                conn.commit()
+                st.success("✅ Operational Advance saved.")
+                st.rerun()
 # ==============================
-# Part 5: User Management & Reports
+# Part 5: User Management, Project/Task Management, Reports
 # ==============================
 
 # --- User Management ---
@@ -914,10 +879,11 @@ elif page == "User Management":
         with col1:
             del_user = st.selectbox("Select User ID to delete", users["id"])
             if st.button("🗑️ Delete User"):
-                c.execute("DELETE FROM users WHERE id=?", (del_user,))
-                conn.commit()
-                st.success(f"✅ User {del_user} deleted.")
-                st.rerun()
+                if st.confirm("Are you sure you want to delete this user?"):
+                    c.execute("DELETE FROM users WHERE id=?", (del_user,))
+                    conn.commit()
+                    st.success(f"✅ User {del_user} deleted.")
+                    st.rerun()
 
         with col2:
             reset_user = st.selectbox("Reset password for", users["username"])
@@ -931,6 +897,82 @@ elif page == "User Management":
                     conn.commit()
                     st.success(f"✅ Password reset for {reset_user}")
 
+# --- Project & Task Management ---
+elif page == "Project & Task Management":
+    st.title("📂 Project & Task (WBL) Management")
+
+    # Add Project
+    st.subheader("➕ Add Project")
+    with st.form("proj_form"):
+        project_code = st.text_input("Project Code (e.g. DR0092)")
+        project_desc = st.text_input("Project Description (optional)")
+        if st.form_submit_button("Add Project"):
+            try:
+                c.execute("INSERT INTO projects (code, description) VALUES (?,?)",
+                          (project_code.strip(), project_desc.strip()))
+                conn.commit()
+                st.success(f"✅ Project {project_code} added successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    # Add Task
+    st.subheader("➕ Add Task")
+    projects = pd.read_sql("SELECT * FROM projects", conn)
+    if projects.empty:
+        st.warning("⚠️ Add a project first.")
+    else:
+        proj_choice = st.selectbox("Select Project", projects["code"])
+        proj_row = c.execute("SELECT id FROM projects WHERE code=?", (proj_choice,)).fetchone()
+        proj_id = proj_row[0] if proj_row else None
+
+        with st.form("task_form"):
+            task_number = st.text_input("Task Number (e.g. A:2:1:002)")
+            task_desc = st.text_input("Task Description (optional)")
+            if st.form_submit_button("Add Task"):
+                try:
+                    if not proj_id:
+                        st.error("⚠️ Selected project not found in DB.")
+                    else:
+                        c.execute("INSERT INTO tasks (project_id, task_number, task_desc) VALUES (?,?,?)",
+                                  (proj_id, task_number.strip(), task_desc.strip()))
+                        conn.commit()
+                        st.success("✅ Task added successfully!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    # Existing Projects & Tasks
+    st.subheader("📋 Existing Projects & Tasks")
+    tasks = pd.read_sql("""
+        SELECT t.id, p.code as project_code, t.task_number, 
+               p.description as project_desc, t.task_desc
+        FROM tasks t 
+        JOIN projects p ON t.project_id = p.id
+    """, conn)
+    if tasks.empty:
+        st.info("No tasks yet.")
+    else:
+        st.dataframe(tasks, use_container_width=True)
+
+        del_task = st.selectbox("Select Task ID to delete", tasks["id"])
+        if st.button("🗑️ Delete Task"):
+            c.execute("DELETE FROM tasks WHERE id=?", (del_task,))
+            conn.commit()
+            st.success(f"✅ Task {del_task} deleted.")
+            st.rerun()
+
+    # Delete Project
+    st.subheader("🗑️ Delete Project")
+    if not projects.empty:
+        del_proj = st.selectbox("Select Project ID to delete", projects["id"])
+        if st.button("🗑️ Delete Project & Its Tasks"):
+            c.execute("DELETE FROM tasks WHERE project_id=?", (del_proj,))
+            c.execute("DELETE FROM projects WHERE id=?", (del_proj,))
+            conn.commit()
+            st.success(f"✅ Project {del_proj} and tasks deleted.")
+            st.rerun()
+
 # --- Reports ---
 elif page == "Reports":
     st.title("📑 Reports & Exports")
@@ -939,7 +981,7 @@ elif page == "Reports":
     st.subheader("🔍 Filters")
     col1, col2, col3 = st.columns(3)
     with col1:
-        all_prs = pd.read_sql("SELECT DISTINCT pr_number FROM pr_tracking", conn)
+        all_prs = pd.read_sql("SELECT pr_number FROM pr_tracking", conn)
         pr_filter = st.selectbox("Filter by PR Number", ["All"] + all_prs["pr_number"].tolist() if not all_prs.empty else ["All"])
     with col2:
         all_categories = pd.read_sql("SELECT DISTINCT category FROM pr_tracking", conn)
@@ -951,41 +993,50 @@ elif page == "Reports":
     # Single PR Report
     st.subheader("📄 Single PR Report")
     if pr_filter != "All":
-        prs = pd.read_sql("SELECT * FROM pr_tracking WHERE pr_number=?", conn, params=[pr_filter])
-        if prs.empty:
-            st.warning("⚠️ No PRs found with that number.")
-        else:
-            pr_id_choice = st.selectbox("Select specific PR ID", prs["id"])
-            pr_data = prs[prs["id"] == pr_id_choice]
+        if st.button("🔍 Generate Report"):
+            pr_choice = pr_filter
+            pr_data = pd.read_sql("SELECT * FROM pr_tracking WHERE pr_number=?", conn, params=[pr_choice])
 
             st.markdown("### 📝 PR Details")
-            pr_row = pr_data.iloc[0]
-            st.markdown(f"""
-            <div style="background:#f9f9f9; padding:10px; border-radius:8px;">
-                <b>PR ID:</b> {pr_row['id']}<br>
-                <b>PR Number:</b> {pr_row['pr_number']}<br>
-                <b>Date of Request:</b> {pr_row['date_request']}<br>
-                <b>Staff:</b> {pr_row['staff_name']}<br>
-                <b>Programme Unit:</b> {pr_row['programme_unit']}<br>
-                <b>Category:</b> {pr_row['category']}<br>
-                <b>Status:</b> {pr_row['status']}
-            </div>
-            """, unsafe_allow_html=True)
+            if not pr_data.empty:
+                pr_row = pr_data.iloc[0]
+                st.markdown(f"""
+                <div style="background:#f9f9f9; padding:10px; border-radius:8px;">
+                    <b>PR Number:</b> {pr_row['pr_number']}<br>
+                    <b>Date of Request:</b> {pr_row['date_request']}<br>
+                    <b>Staff:</b> {pr_row['staff_name']}<br>
+                    <b>Programme Unit:</b> {pr_row['programme_unit']}<br>
+                    <b>Category:</b> {pr_row['category']}<br>
+                    <b>Status:</b> {pr_row['status']}
+                </div>
+                """, unsafe_allow_html=True)
 
-            # Payments linked to PR
+            # WBL Allocations
+            st.subheader("📂 WBL Allocations")
+            wbls = pd.read_sql("""
+                SELECT pw.percentage, p.code AS project_code, t.task_number, t.task_desc
+                FROM pr_wbls pw
+                LEFT JOIN tasks t ON pw.task_id = t.id
+                LEFT JOIN projects p ON t.project_id = p.id
+                WHERE pw.pr_number=?
+            """, conn, params=[pr_choice])
+            st.dataframe(wbls if not wbls.empty else pd.DataFrame(columns=["No WBLs found"]), use_container_width=True)
+
+            # Payments
             st.subheader("💰 Payments")
-            payments = pd.read_sql("SELECT * FROM payment_tracking WHERE pr_id=?", conn, params=[pr_id_choice])
+            payments = pd.read_sql("SELECT * FROM payment_tracking WHERE pr_number=?", conn, params=[pr_choice])
             st.dataframe(payments if not payments.empty else pd.DataFrame(columns=["No payments found"]), use_container_width=True)
 
             # Status Timeline
             st.subheader("📜 Status Timeline")
-            timeline = pd.read_sql("SELECT * FROM status_history WHERE record_id=? ORDER BY changed_at", conn, params=[pr_id_choice])
+            timeline = pd.read_sql("SELECT * FROM status_history WHERE record_id=? ORDER BY changed_at", conn, params=[pr_choice])
             st.dataframe(timeline if not timeline.empty else pd.DataFrame(columns=["No status history"]), use_container_width=True)
 
             # Export PR-specific report
-            file_name = f"PR_Report_{pr_row['pr_number']}_ID{pr_id_choice}.xlsx"
+            file_name = f"PR_Report_{pr_choice}.xlsx"
             with pd.ExcelWriter(file_name, engine="xlsxwriter") as writer:
                 pr_data.to_excel(writer, index=False, sheet_name="PR")
+                wbls.to_excel(writer, index=False, sheet_name="WBLs")
                 payments.to_excel(writer, index=False, sheet_name="Payments")
                 timeline.to_excel(writer, index=False, sheet_name="Timeline")
             with open(file_name, "rb") as f:
@@ -995,6 +1046,12 @@ elif page == "Reports":
     st.subheader("📊 Export All Data")
     if st.button("⬇️ Download Full Database"):
         pr_all = pd.read_sql("SELECT * FROM pr_tracking", conn)
+        wbl_all = pd.read_sql("""
+            SELECT pw.pr_number, pw.percentage, p.code AS project_code, t.task_number, t.task_desc
+            FROM pr_wbls pw
+            LEFT JOIN tasks t ON pw.task_id = t.id
+            LEFT JOIN projects p ON t.project_id = p.id
+        """, conn)
         pay_all = pd.read_sql("SELECT * FROM payment_tracking", conn)
         dsa_all = pd.read_sql("SELECT * FROM dsa_payments", conn)
         oa_all = pd.read_sql("SELECT * FROM operational_advances", conn)
@@ -1003,6 +1060,7 @@ elif page == "Reports":
         file_name = "Full_Report.xlsx"
         with pd.ExcelWriter(file_name, engine="xlsxwriter") as writer:
             pr_all.to_excel(writer, index=False, sheet_name="PRs")
+            wbl_all.to_excel(writer, index=False, sheet_name="WBLs")
             pay_all.to_excel(writer, index=False, sheet_name="Payments")
             dsa_all.to_excel(writer, index=False, sheet_name="DSA_Payments")
             oa_all.to_excel(writer, index=False, sheet_name="Operational_Advances")
