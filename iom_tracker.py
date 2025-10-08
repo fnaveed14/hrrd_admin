@@ -109,6 +109,19 @@ c.execute("""CREATE TABLE IF NOT EXISTS dsa_payments (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 )""")
 
+
+
+c.execute("""CREATE TABLE IF NOT EXISTS status_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT,
+    record_id TEXT,
+    old_status TEXT,
+    new_status TEXT,
+    changed_by TEXT,
+    changed_at TEXT DEFAULT CURRENT_TIMESTAMP
+)""")
+
+# --- Operational Advances Table ---
 c.execute("""CREATE TABLE IF NOT EXISTS operational_advances (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date_request TEXT,
@@ -127,15 +140,41 @@ c.execute("""CREATE TABLE IF NOT EXISTS operational_advances (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 )""")
 
-c.execute("""CREATE TABLE IF NOT EXISTS status_history (
+# --- Operational Advance Liquidations Table ---
+c.execute("""CREATE TABLE IF NOT EXISTS operational_liquidations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    record_type TEXT,
-    record_id TEXT,
-    old_status TEXT,
-    new_status TEXT,
-    changed_by TEXT,
-    changed_at TEXT DEFAULT CURRENT_TIMESTAMP
+    oa_id INTEGER,  -- ✅ must reference a valid OA record
+    date_request TEXT,
+    staff_name TEXT,
+    programme_unit TEXT,
+    category TEXT,
+    supplier_name TEXT,
+    description TEXT,
+    invoice_type TEXT,
+    invoice_no TEXT,
+    total_amount REAL,
+    invoice_currency TEXT,
+    payment_currency TEXT,
+    liquidation_ist TEXT,
+    liquidation_amount REAL,
+    wbl_project_code TEXT,
+    wbl_task_number TEXT,
+    unspent_amount REAL,
+    unspent_deposit_yesno TEXT,
+    deposited_amount REAL,
+    unspent_ist1 TEXT,
+    unspent_ist2 TEXT,
+    unspent_wbl_project_code TEXT,
+    unspent_wbl_task_number TEXT,
+    documents_submitted TEXT,
+    location TEXT,
+    comments TEXT,
+    status TEXT DEFAULT 'Pending',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (oa_id) REFERENCES operational_advances (id) ON DELETE CASCADE
 )""")
+conn.commit()
+
 
 conn.commit()
 
@@ -223,9 +262,11 @@ page = st.sidebar.radio("📂 Navigation", [
     "Dashboard",
     "PR Tracking",
     "Payment Tracking",
+    "Operational Advance Liquidation",   # 🆕 new option
     "User Management",
     "Reports"
 ])
+
 
 # ==============================
 # Part 2: Dashboard
@@ -391,36 +432,110 @@ if page == "Dashboard":
                 st.success(f"DSA Payment {deldsa} deleted ✅")
                 st.rerun()
 
-    # --- Operational Advances ---
-    st.subheader("💼 Operational Advances")
-    oas = pd.read_sql("SELECT * FROM operational_advances", conn)
+        # --- Operational Advances + Liquidations ---
+    st.subheader("💼 Operational Advances & Liquidations")
+
+    # Merge OA + Liquidation info
+    oa_query = """
+    SELECT 
+        oa.id AS id,
+        oa.date_request AS date_request,
+        oa.staff_name AS staff_name,
+        oa.programme_unit AS programme_unit,
+        oa.supplier_name AS supplier_name,
+        oa.total_amount AS total_amount,
+        oa.status AS oa_status,
+        li.id AS liquidation_id,
+        li.status AS liquidation_status,
+        li.liquidation_amount AS liquidation_amount,
+        li.date_request AS liquidation_date
+    FROM operational_advances oa
+    LEFT JOIN operational_liquidations li ON oa.id = li.oa_id
+    ORDER BY oa.id DESC
+    """
+    oas = pd.read_sql(oa_query, conn)
+
     if oas.empty:
-        st.info("No operational advances yet.")
+        st.info("No operational advances or liquidations yet.")
     else:
-        st.dataframe(oas, use_container_width=True, height=400)
+        # Show table with both OA and liquidation info
+        display_df = oas.copy()
+        display_df.rename(columns={
+            "id": "OA ID",
+            "date_request": "OA Date",
+            "staff_name": "Staff",
+            "programme_unit": "Programme Unit",
+            "supplier_name": "Supplier",
+            "total_amount": "Total Amount",
+            "oa_status": "OA Status",
+            "liquidation_id": "Liquidation ID",
+            "liquidation_status": "Liquidation Status",
+            "liquidation_amount": "Liquidation Amount",
+            "liquidation_date": "Liquidation Date"
+        }, inplace=True)
+
+        st.dataframe(display_df, use_container_width=True, height=400)
 
         col1, col2 = st.columns(2)
+
+        # --- Update OA Status ---
         with col1:
+            st.markdown("### 🔄 Update OA Status")
             update_oa = st.selectbox("Select OA ID to update status", oas["id"])
-            new_status = st.selectbox("New Status (OA)", ["Pending", "In Process", "Completed", "Paid"])
-            if st.button("🔄 Update OA Status"):
+            new_status = st.selectbox("New OA Status", ["Pending", "In Process", "Completed", "Paid"])
+            if st.button("💾 Update OA Status"):
                 old_status = c.execute("SELECT status FROM operational_advances WHERE id=?", (update_oa,)).fetchone()[0]
                 c.execute("UPDATE operational_advances SET status=? WHERE id=?", (new_status, update_oa))
                 c.execute("""INSERT INTO status_history 
-                             (record_type, record_id, old_status, new_status, changed_by) 
-                             VALUES (?,?,?,?,?)""",
-                          ("OA", str(update_oa), old_status, new_status, st.session_state["user"]))
+                            (record_type, record_id, old_status, new_status, changed_by)
+                            VALUES (?,?,?,?,?)""",
+                        ("OA", str(update_oa), old_status, new_status, st.session_state["user"]))
                 conn.commit()
-                st.success(f"Operational Advance {update_oa} updated to {new_status}")
+                st.success(f"✅ Operational Advance {update_oa} updated to {new_status}")
                 st.rerun()
 
+        # --- Update Liquidation Status ---
         with col2:
-            deloa = st.selectbox("Select OA ID to delete", oas["id"])
-            if st.button("🗑️ Delete Operational Advance"):
-                c.execute("DELETE FROM operational_advances WHERE id=?", (deloa,))
-                conn.commit()
-                st.success(f"Operational Advance {deloa} deleted ✅")
-                st.rerun()
+            st.markdown("### 🧾 Update Liquidation Status")
+            # Filter to OAs that have a liquidation record
+            li_opts = oas.dropna(subset=["liquidation_id"])
+            if li_opts.empty:
+                st.info("No liquidation records found yet.")
+            else:
+                selected_liq = st.selectbox(
+                    "Select Liquidation Record (OA ID | Supplier)",
+                    li_opts.apply(lambda r: f"{r['id']} | {r['supplier_name']}", axis=1)
+                )
+
+                selected_oa_id = int(selected_liq.split(" | ")[0])
+                old_liq_status = c.execute(
+                    "SELECT status FROM operational_liquidations WHERE oa_id=?",
+                    (selected_oa_id,)
+                ).fetchone()
+
+                new_liq_status = st.selectbox("New Liquidation Status", ["Pending", "In Process", "Completed", "Paid"])
+
+                if st.button("💾 Update Liquidation Status"):
+                    try:
+                        # Update liquidation record
+                        c.execute("UPDATE operational_liquidations SET status=? WHERE oa_id=?", (new_liq_status, selected_oa_id))
+                        # Cascade update OA
+                        c.execute("UPDATE operational_advances SET status=? WHERE id=?", (new_liq_status, selected_oa_id))
+                        # Log both changes
+                        c.execute("""INSERT INTO status_history
+                                    (record_type, record_id, old_status, new_status, changed_by)
+                                    VALUES (?,?,?,?,?)""",
+                                ("Liquidation", str(selected_oa_id), old_liq_status[0] if old_liq_status else None, new_liq_status, st.session_state["user"]))
+                        c.execute("""INSERT INTO status_history
+                                    (record_type, record_id, old_status, new_status, changed_by)
+                                    VALUES (?,?,?,?,?)""",
+                                ("OA", str(selected_oa_id), old_liq_status[0] if old_liq_status else None, new_liq_status, st.session_state["user"]))
+                        conn.commit()
+                        st.success(f"✅ Liquidation status updated to {new_liq_status} for OA ID {selected_oa_id}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error updating liquidation: {e}")
+
 
     # --- Reminders ---
 
@@ -465,38 +580,38 @@ if page == "Dashboard":
             "reminder_days": "Days Before"
         }), use_container_width=True, height=300)
 
-
 # ==============================
-# Part 3: PR Tracking
+# Part 3: PR Tracking (Multi-Line, Shared WBL, Validation)
 # ==============================
 
 elif page == "PR Tracking":
     st.title("📝 New Purchase Request")
 
-    # --- PR Form ---
-    st.subheader("➕ Create PR")
+    # --- PR Header ---
+    st.subheader("➕ Create PR Header")
 
     col1, col2 = st.columns(2)
     with col1:
-        pr_number = st.text_input("PR Number")
-        date_request = st.date_input("Date of Request")
-        staff_name = st.text_input("Created By", value=st.session_state["user"])
+        pr_number = st.text_input("PR Number *")
+        date_request = st.date_input("Date of Request *")
+        staff_name = st.text_input("Created By *", value=st.session_state["user"])
         programme_unit = st.selectbox(
-            "Programme Unit", 
-            ["CRLR","HEALTH","PROTECTION","SNFI and WASH","DTM","FCDO- BRAVE","MECC","Core Staff_ HRRD"]
+            "Programme Unit *",
+            ["", "CRLR", "HEALTH", "PROTECTION", "SNFI and WASH", "DTM", "FCDO- BRAVE", "MECC", "Core Staff_ HRRD"],
+            index=0
         )
-        type_services = st.selectbox("Type of Services", ["Goods","Services","Works"])
-        category = st.selectbox("Category", [
-            "Implementing Partners","Professional Services","Medical",
-            "Private Sector Partners","Event management","ICT","WSNFI",
-            "Miscellaneous","Rental Vehicle"
-        ])
+        type_services = st.selectbox("Type of Services *", ["", "Goods", "Services", "Works"], index=0)
+        category = st.selectbox("Category *", [
+            "", "Implementing Partners", "Professional Services", "Medical",
+            "Private Sector Partners", "Event management", "ICT", "WSNFI",
+            "Miscellaneous", "Rental Vehicle"
+        ], index=0)
     with col2:
-        description = st.text_area("Description")
+        description = st.text_area("Description (Optional)")
         assigned_users = pd.read_sql("SELECT username FROM users", conn)
         assigned_to = st.selectbox(
-            "Assign To", 
-            assigned_users["username"].tolist() if not assigned_users.empty else ["admin"], 
+            "Assign To *",
+            assigned_users["username"].tolist() if not assigned_users.empty else ["admin"],
             index=0
         )
 
@@ -506,105 +621,170 @@ elif page == "PR Tracking":
         st.markdown("### 🚗 Rental Vehicle Details")
         col1, col2 = st.columns(2)
         with col1:
-            type_vehicle = st.selectbox("Type of Vehicle", [
-                "Sedan Car","Parado","Double Cabin Vigo/Hilux",
-                "Armoured Vehicle","Equipped Ambulance","HiAce","Bus","Coaster"
-            ])
-            traveller_name = st.text_input("Traveller Name")
+            type_vehicle = st.selectbox("Type of Vehicle *", [
+                "", "Sedan Car", "Parado", "Double Cabin Vigo/Hilux",
+                "Armoured Vehicle", "Equipped Ambulance", "HiAce", "Bus", "Coaster"
+            ], index=0)
+            traveller_name = st.text_input("Traveller Name (Optional)")
         with col2:
-            traveller_phone = st.text_input("Traveller Phone #")
+            traveller_phone = st.text_input("Traveller Phone # (Optional)")
 
-    # --- Dates & Duration ---
-    st.markdown("### 📅 Travel/Request Duration")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        from_date = st.date_input("From")
-    with col2:
-        to_date = st.date_input("To")
-    with col3:
-        days = max((to_date - from_date).days, 0) if from_date and to_date else 0
-        st.metric("Calculated Days", days)
+    # --- Multi-Line Support ---
+    st.markdown("### 🧾 Multi-Line Entry")
+    num_lines = st.number_input("Number of PR Lines", min_value=1, max_value=10, value=1)
 
-    # --- Costs & Location ---
-    st.markdown("### 💵 Cost & Location")
-    col1, col2 = st.columns(2)
-    with col1:
-        location = st.text_input("Location")
-        qty = st.number_input("Quantity", min_value=1)
-        est_pkr = st.number_input("Estimated Cost (PKR)", min_value=0.0)
-    with col2:
-        est_usd = st.number_input("Estimated Cost (USD)", min_value=0.0)
-        comments = st.text_area("Comments")
+    # --- Shared WBL Option ---
+    st.markdown("### 📂 WBL Allocation Options")
+    same_wbl_for_all = st.checkbox("✅ Use the same WBL allocation for all PR lines")
 
-    # --- Reminder (for all PRs) ---
-    st.markdown("### ⏰ Reminder")
-    reminder_expiry = st.radio("Set reminder before start date (From)?", ["Yes", "No"])
-    reminder_days = None
-    if reminder_expiry == "Yes":
-        reminder_days = st.number_input(
-            "Remind me this many days before From date",
-            min_value=1
-        )
+    shared_wbls = []
+    if same_wbl_for_all:
+        st.info("You selected: Same WBL(s) for all lines.")
+        num_shared_wbls = st.number_input("Number of WBL allocations (shared)", min_value=1, max_value=5, value=1, key="shared_num_wbls")
+        for j in range(num_shared_wbls):
+            st.markdown(f"**Shared WBL #{j+1}**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                proj = st.text_input(f"Project Name (Shared WBL {j+1}) *", key=f"shared_proj_{j}")
+            with col2:
+                task = st.text_input(f"Task Name (Shared WBL {j+1}) *", key=f"shared_task_{j}")
+            with col3:
+                perc = st.number_input(f"Percentage (Shared WBL {j+1}) *",
+                                        min_value=0, max_value=100,
+                                        value=100 if j == 0 else 0, key=f"shared_perc_{j}")
+            if proj.strip() and task.strip():
+                shared_wbls.append((proj.strip(), task.strip(), perc))
 
-    # --- WBL Selection (Manual Text Entry) ---
-    st.markdown("### 📂 WBL Allocation")
-    wbl_selections = []
-    num_wbls = st.number_input("Number of allocations", min_value=1, max_value=5, value=1)
+    pr_lines = []
 
-    for i in range(num_wbls):
-        st.markdown(f"**WBL #{i+1}**")
+    # --- PR Lines Loop ---
+    for i in range(int(num_lines)):
+        st.markdown(f"---\n### 🧩 PR Line #{i+1}")
+
+        # --- Dates & Duration ---
+        st.markdown("#### 📅 Travel/Request Duration")
         col1, col2, col3 = st.columns(3)
         with col1:
-            proj_name = st.text_input(f"Project Name (WBL {i+1})", key=f"proj_{i}")
+            from_date = st.date_input(f"From (Line {i+1}) *", key=f"from_{i}")
         with col2:
-            task_name = st.text_input(f"Task Name (WBL {i+1})", key=f"task_{i}")
+            to_date = st.date_input(f"To (Line {i+1}) *", key=f"to_{i}")
         with col3:
-            perc = st.number_input(
-                f"Percentage (WBL {i+1})", 
-                min_value=0, max_value=100, 
-                value=100 if i==0 else 0, key=f"perc_{i}"
+            days = max((to_date - from_date).days + 1, 0) if from_date and to_date else 0
+            st.metric(f"Calculated Days (Line {i+1})", days)
+
+        # --- Costs & Location ---
+        st.markdown("#### 💵 Cost & Location")
+        col1, col2 = st.columns(2)
+        with col1:
+            location = st.text_input(f"Location (Line {i+1}) *", key=f"loc_{i}")
+            qty = st.number_input(f"Quantity (Line {i+1}) *", min_value=1, key=f"qty_{i}")
+            est_pkr = st.number_input(f"Estimated Cost (PKR) (Line {i+1}) *", min_value=1.0, key=f"pkr_{i}")
+        with col2:
+            est_usd = st.number_input(f"Estimated Cost (USD) (Line {i+1}) *", min_value=0.0, key=f"usd_{i}")
+            comments = st.text_area(f"Comments (Line {i+1}) (Optional)", key=f"comm_{i}")
+
+        # --- Reminder ---
+        st.markdown("#### ⏰ Reminder")
+        reminder_expiry = st.radio(f"Set reminder before start date? (Line {i+1}) *", ["Yes", "No"], key=f"rem_{i}")
+        reminder_days = None
+        if reminder_expiry == "Yes":
+            reminder_days = st.number_input(
+                f"Remind me this many days before From date (Line {i+1}) *", min_value=1, key=f"remd_{i}"
             )
-        if proj_name.strip() and task_name.strip():
-            wbl_selections.append((proj_name.strip(), task_name.strip(), perc))
+
+        # --- WBL Allocation ---
+        if not same_wbl_for_all:
+            st.markdown("#### 📂 WBL Allocation (Individual)")
+            wbls = []
+            num_wbls = st.number_input(f"Number of WBL allocations (Line {i+1})", min_value=1, max_value=5, value=1, key=f"numwbl_{i}")
+            for j in range(num_wbls):
+                st.markdown(f"**WBL #{j+1} (Line {i+1})**")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    proj_name = st.text_input(f"Project Name (Line {i+1} WBL {j+1}) *", key=f"proj_{i}_{j}")
+                with col2:
+                    task_name = st.text_input(f"Task Name (Line {i+1} WBL {j+1}) *", key=f"task_{i}_{j}")
+                with col3:
+                    perc = st.number_input(f"Percentage (Line {i+1} WBL {j+1}) *",
+                                            min_value=0, max_value=100,
+                                            value=100 if j == 0 else 0,
+                                            key=f"perc_{i}_{j}")
+                if proj_name.strip() and task_name.strip():
+                    wbls.append((proj_name.strip(), task_name.strip(), perc))
+        else:
+            wbls = shared_wbls
+
+        pr_lines.append({
+            "from_date": from_date,
+            "to_date": to_date,
+            "days": days,
+            "location": location,
+            "qty": qty,
+            "est_pkr": est_pkr,
+            "est_usd": est_usd,
+            "comments": comments,
+            "reminder_expiry": reminder_expiry,
+            "reminder_days": reminder_days,
+            "wbls": wbls
+        })
 
     # --- Submit PR ---
     if st.button("✅ Submit PR"):
+        missing_fields = []
         if not pr_number.strip():
-            st.error("⚠️ PR number is required.")
-        elif sum([p for _, _, p in wbl_selections if p]) != 100:
-            st.error("⚠️ WBL percentages must add up to 100!")
+            missing_fields.append("PR Number")
+        if programme_unit == "":
+            missing_fields.append("Programme Unit")
+        if type_services == "":
+            missing_fields.append("Type of Services")
+        if category == "":
+            missing_fields.append("Category")
+        if category == "Rental Vehicle" and type_vehicle == "":
+            missing_fields.append("Type of Vehicle")
+        if not assigned_to.strip():
+            missing_fields.append("Assigned To")
+
+        if missing_fields:
+            st.error("⚠️ Missing required fields: " + ", ".join(missing_fields))
+        elif same_wbl_for_all and sum([p for _, _, p in shared_wbls if p]) != 100:
+            st.error("⚠️ Shared WBL percentages must add up to 100!")
         else:
             try:
-                # Insert PR
-                c.execute("""INSERT INTO pr_tracking (
-                    pr_number, date_request, staff_name, programme_unit, type_services, category,
-                    description, type_vehicle, traveller_name, traveller_phone,
-                    from_date, to_date, days, location, qty,
-                    est_cost_pkr, est_cost_usd, reminder_expiry, reminder_days,
-                    comments, status, created_at, assigned_to
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    pr_number, str(date_request), staff_name, programme_unit, type_services, category,
-                    description, type_vehicle, traveller_name, traveller_phone,
-                    str(from_date), str(to_date), days, location, qty,
-                    est_pkr, est_usd, reminder_expiry, reminder_days,
-                    comments, "Submitted", datetime.now(), assigned_to
-                ))
-                pr_id = c.lastrowid  # ✅ capture inserted PR ID
+                for idx, line in enumerate(pr_lines, start=1):
+                    # Validate per-line required fields
+                    if not line["location"].strip() or not line["from_date"] or not line["to_date"]:
+                        st.error(f"⚠️ Missing required fields in PR Line #{idx}")
+                        st.stop()
 
-                # Insert WBLs
-                for proj_name, task_name, perc in wbl_selections:
-                    c.execute("INSERT INTO pr_wbls (pr_id, project_name, task_name, percentage) VALUES (?,?,?,?)",
-                              (pr_id, proj_name, task_name, perc))
+                    c.execute("""INSERT INTO pr_tracking (
+                        pr_number, date_request, staff_name, programme_unit, type_services, category,
+                        description, type_vehicle, traveller_name, traveller_phone,
+                        from_date, to_date, days, location, qty,
+                        est_cost_pkr, est_cost_usd, reminder_expiry, reminder_days,
+                        comments, status, created_at, assigned_to
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        pr_number, str(date_request), staff_name, programme_unit, type_services, category,
+                        description, type_vehicle, traveller_name, traveller_phone,
+                        str(line["from_date"]), str(line["to_date"]), line["days"], line["location"], line["qty"],
+                        line["est_pkr"], line["est_usd"], line["reminder_expiry"], line["reminder_days"],
+                        line["comments"], "Submitted", datetime.now(), assigned_to
+                    ))
+                    pr_id = c.lastrowid
 
-                # Log creation
-                c.execute("""INSERT INTO status_history 
-                             (record_type, record_id, old_status, new_status, changed_by) 
-                             VALUES (?,?,?,?,?)""",
-                          ("PR", pr_id, None, "Submitted", st.session_state["user"]))
+                    # --- Insert WBLs ---
+                    for proj_name, task_name, perc in line["wbls"]:
+                        c.execute("INSERT INTO pr_wbls (pr_id, project_name, task_name, percentage) VALUES (?,?,?,?)",
+                                  (pr_id, proj_name, task_name, perc))
+
+                    # --- Log creation ---
+                    c.execute("""INSERT INTO status_history 
+                                 (record_type, record_id, old_status, new_status, changed_by) 
+                                 VALUES (?,?,?,?,?)""",
+                              ("PR", pr_id, None, "Submitted", st.session_state["user"]))
 
                 conn.commit()
-                st.success(f"✅ PR {pr_number} (ID {pr_id}) submitted successfully!")
+                st.success(f"✅ {num_lines} PR line(s) saved under PR {pr_number}!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
@@ -615,7 +795,7 @@ elif page == "PR Tracking":
         prs = pd.read_sql("SELECT * FROM pr_tracking", conn)
     else:
         prs = pd.read_sql(
-            "SELECT * FROM pr_tracking WHERE staff_name=? OR assigned_to=?", 
+            "SELECT * FROM pr_tracking WHERE staff_name=? OR assigned_to=?",
             conn, params=[st.session_state["user"], st.session_state["user"]]
         )
 
@@ -666,7 +846,6 @@ elif page == "Payment Tracking":
             pr_number_choice = st.selectbox("Select PR Number", prs["pr_number"].unique().tolist())
             pr_subset = prs[prs["pr_number"] == pr_number_choice]
 
-            # Build descriptive labels for each PR line
             pr_options = {
                 row["id"]: f"ID {row['id']} | {row['pr_number']} | {row['description']} | {row['staff_name']}"
                 for _, row in pr_subset.iterrows()
@@ -680,7 +859,6 @@ elif page == "Payment Tracking":
 
             pr_data = pr_subset[pr_subset["id"] == pr_id_choice].iloc[0]
 
-            # --- PR Details (pretty card style) ---
             st.markdown("### 📝 Purchase Request Details")
             st.markdown(f"""
             <div style="background:#f9f9f9; padding:10px; border-radius:8px;">
@@ -723,13 +901,11 @@ elif page == "Payment Tracking":
             status = st.selectbox("Payment Status", ["Pending","In Process","Completed"])
 
             if st.button("💾 Save Payment"):
-                # Check if a payment already exists for this PR line
                 existing_payment = c.execute(
                     "SELECT id FROM payment_tracking WHERE pr_id=?", (pr_id_choice,)
                 ).fetchone()
 
                 if existing_payment:
-                    # ✅ Update existing record
                     c.execute("""UPDATE payment_tracking
                                 SET pr_number=?, category=?, po_number=?, invoice_number=?, wave_receipt=?, 
                                     work_confirmation=?, work_order_yesno=?, work_order_number=?, actual_usd=?, actual_pkr=?,
@@ -741,7 +917,6 @@ elif page == "Payment Tracking":
                     st.success(f"✅ Updated payment for PR {pr_number_choice} (ID {pr_id_choice}). Status: {status}")
 
                 else:
-                    # ✅ Insert new record
                     c.execute("""INSERT INTO payment_tracking (
                         pr_id, pr_number, category, po_number, invoice_number, wave_receipt,
                         work_confirmation, work_order_yesno, work_order_number, actual_usd, actual_pkr,
@@ -753,13 +928,11 @@ elif page == "Payment Tracking":
                     ))
                     st.success(f"✅ New payment saved for PR {pr_number_choice} (ID {pr_id_choice}). Status: {status}")
 
-                # log status history
                 c.execute("""INSERT INTO status_history 
                             (record_type, record_id, old_status, new_status, changed_by) 
                             VALUES (?,?,?,?,?)""",
                         ("Payment", str(pr_id_choice), None, status, st.session_state["user"]))
 
-                # sync PR status if payment is completed
                 if status == "Completed":
                     old_pr_status = pr_data["status"]
                     c.execute("UPDATE pr_tracking SET status='Completed' WHERE id=?", (pr_id_choice,))
@@ -769,12 +942,8 @@ elif page == "Payment Tracking":
                             ("PR", str(pr_id_choice), old_pr_status, "Completed", st.session_state["user"]))
 
                 conn.commit()
-
-                # ⏳ Pause to show success message for 2 seconds
                 time.sleep(2)
-
                 st.rerun()
-
 
     # --- Case 2: DSA Payment ---
     elif category_choice == "DSA Payment":
@@ -798,9 +967,8 @@ elif page == "Payment Tracking":
         with col2:
             end_date = st.date_input("End Date")
 
-        # days calc: last day = 0.3
         diff = (end_date - start_date).days
-        days = 0 if diff <= 0 else 0.3 if diff == 1 else (diff - 1) + 0.3
+        days = 0 if diff < 0 else diff + 0.3
         st.metric("Calculated Days", days)
 
         col1, col2 = st.columns(2)
@@ -832,6 +1000,7 @@ elif page == "Payment Tracking":
     # --- Case 3: Operational Advance ---
     elif category_choice == "Operational Advance":
         st.subheader("💼 Operational Advance Form")
+
         col1, col2 = st.columns(2)
         with col1:
             date_request = st.date_input("Date of Request")
@@ -846,31 +1015,129 @@ elif page == "Payment Tracking":
             total_amount = st.number_input("Total Amount", min_value=0.0)
             invoice_currency = st.text_input("Invoice Currency")
             payment_currency = st.text_input("Payment Currency")
-
-        col1, col2 = st.columns(2)
-        with col1:
             location = st.text_input("Location")
-        with col2:
             comments = st.text_area("Comments")
             status = st.selectbox("Status", ["Pending","In Process","Completed","Paid"])
 
         if st.button("💾 Save Operational Advance"):
-            c.execute("""INSERT INTO operational_advances (
-                date_request, staff_name, programme_unit, supplier_name, description,
+            try:
+                c.execute("""INSERT INTO operational_advances (
+                    date_request, staff_name, programme_unit, supplier_name, description,
+                    invoice_type, invoice_no, total_amount, invoice_currency, payment_currency,
+                    location, comments, status
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    str(date_request), staff_name, programme_unit, supplier_name, description,
+                    invoice_type, invoice_no, total_amount, invoice_currency, payment_currency,
+                    location, comments, status
+                ))
+                conn.commit()
+                c.execute("""INSERT INTO status_history 
+                             (record_type, record_id, old_status, new_status, changed_by) 
+                             VALUES (?,?,?,?,?)""",
+                          ("OA", str(c.lastrowid), None, status, st.session_state["user"]))
+                conn.commit()
+                st.success("✅ Operational Advance saved successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error saving OA: {e}")
+
+# ==============================
+# Operational Advance Liquidation
+# ==============================
+
+elif page == "Operational Advance Liquidation":
+    st.title("💼 Operational Advance Liquidation")
+
+    oas = pd.read_sql("SELECT * FROM operational_advances", conn)
+    if oas.empty:
+        st.warning("⚠️ No operational advances found.")
+        st.stop()
+
+    selected_oa_id = st.selectbox(
+        "Select Operational Advance to Liquidate",
+        oas["id"],
+        format_func=lambda x: f"ID {x} | {oas.loc[oas['id']==x, 'supplier_name'].values[0]} | {oas.loc[oas['id']==x, 'description'].values[0]}"
+    )
+
+    oa_data = oas[oas["id"] == selected_oa_id].iloc[0]
+
+    st.markdown("### 🔹 Operational Advance Details")
+    st.write(f"""
+    **Programme Unit:** {oa_data['programme_unit']}  
+    **Category:** {oa_data['invoice_type']}  
+    **Supplier:** {oa_data['supplier_name']}  
+    **Description:** {oa_data['description']}  
+    **Invoice No:** {oa_data['invoice_no']}  
+    **Total Amount:** {oa_data['total_amount']}  
+    **Location:** {oa_data['location']}  
+    """)
+
+    st.markdown("### 🧾 Liquidation Information")
+    date_request = st.date_input("Date of Request")
+    staff_name = st.text_input("Staff Name/Admin", value=st.session_state["user"])
+    liquidation_ist = st.text_input("Liquidation IST#")
+    liquidation_amount = st.number_input("Liquidation Amount", min_value=0.0)
+
+    st.markdown("#### WBL 1")
+    col1, col2 = st.columns(2)
+    with col1:
+        wbl_project_code = st.text_input("Project Code (WBL 1)")
+    with col2:
+        wbl_task_number = st.text_input("Task Number (WBL 1)")
+
+    unspent_amount = st.number_input("Unspent Amount", min_value=0.0)
+    unspent_deposit_yesno = st.selectbox("Unspent amount deposited in IOM account?", ["No", "Yes"])
+    deposited_amount = None
+    if unspent_deposit_yesno == "Yes":
+        deposited_amount = st.number_input("Deposited Amount", min_value=0.0)
+
+    unspent_ist1 = st.text_input("Unspent Amount IST#1")
+    unspent_ist2 = st.text_input("Unspent Amount IST#2")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        unspent_wbl_project_code = st.text_input("Project Code (Unspent)")
+    with col2:
+        unspent_wbl_task_number = st.text_input("Task Number (Unspent)")
+
+    documents_submitted = st.selectbox("Documents/Reports Submitted?", ["No", "Yes"])
+    status = st.selectbox("Liquidation Status", ["Pending", "In Process", "Completed", "Paid"])
+    comments = st.text_area("Comments", value=oa_data["comments"] or "")
+
+    if st.button("💾 Save Liquidation Record"):
+        try:
+            c.execute("""INSERT INTO operational_liquidations (
+                oa_id, date_request, staff_name, programme_unit, category, supplier_name, description,
                 invoice_type, invoice_no, total_amount, invoice_currency, payment_currency,
-                location, comments, status
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                str(date_request), staff_name, programme_unit, supplier_name, description,
-                invoice_type, invoice_no, total_amount, invoice_currency, payment_currency,
-                location, comments, status
+                liquidation_ist, liquidation_amount, wbl_project_code, wbl_task_number,
+                unspent_amount, unspent_deposit_yesno, deposited_amount,
+                unspent_ist1, unspent_ist2, unspent_wbl_project_code, unspent_wbl_task_number,
+                documents_submitted, location, comments, status
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                int(oa_data["id"]), str(date_request), staff_name, oa_data["programme_unit"], oa_data["invoice_type"],
+                oa_data["supplier_name"], oa_data["description"], oa_data["invoice_type"], oa_data["invoice_no"],
+                oa_data["total_amount"], oa_data["invoice_currency"], oa_data["payment_currency"],
+                liquidation_ist, liquidation_amount, wbl_project_code, wbl_task_number,
+                unspent_amount, unspent_deposit_yesno, deposited_amount,
+                unspent_ist1, unspent_ist2, unspent_wbl_project_code, unspent_wbl_task_number,
+                documents_submitted, oa_data["location"], comments, status
             ))
-            c.execute("""INSERT INTO status_history 
-                         (record_type, record_id, old_status, new_status, changed_by) 
-                         VALUES (?,?,?,?,?)""",
-                      ("OA", supplier_name, None, status, st.session_state["user"]))
+
+            if status in ["Completed", "Paid"]:
+                c.execute("UPDATE operational_advances SET status=? WHERE id=?", (status, int(oa_data["id"])))
+                c.execute("""INSERT INTO status_history
+                             (record_type, record_id, old_status, new_status, changed_by)
+                             VALUES (?,?,?,?,?)""",
+                          ("OA", str(oa_data["id"]), oa_data["status"], status, st.session_state["user"]))
+                st.info("Operational Advance marked as closed ✅")
+
             conn.commit()
-            st.success("✅ Operational Advance saved.")
+            st.success(f"✅ Liquidation record saved for OA ID {oa_data['id']}")
             st.rerun()
+
+        except Exception as e:
+            st.error(f"Error saving liquidation: {e}")
+
 
 # ==============================
 # Part 5: User Management & Reports
