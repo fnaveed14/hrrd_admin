@@ -680,7 +680,7 @@ elif page == "PR Tracking":
             qty = st.number_input(f"Quantity (Line {i+1}) *", min_value=1, key=f"qty_{i}")
             est_pkr = st.number_input(f"Estimated Cost (PKR) (Line {i+1}) *", min_value=1.0, key=f"pkr_{i}")
         with col2:
-            est_usd = st.number_input(f"Estimated Cost (USD) (Line {i+1} (optional)) ", key=f"usd_{i}")
+            est_usd = st.number_input(f"Estimated Cost (USD) (Line {i+1}) (optional) ", key=f"usd_{i}")
             comments = st.text_area(f"Comments (Line {i+1}) (Optional)", key=f"comm_{i}")
 
         # --- Reminder ---
